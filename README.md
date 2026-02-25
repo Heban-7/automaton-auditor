@@ -33,7 +33,7 @@ START
 
 ```bash
 # Clone the repository
-git clone https://github.com/<your-org>/automaton-auditor.git
+git clone https://github.com/Heban-7/automaton-auditor.git
 cd automaton-auditor
 
 # Install dependencies with uv
@@ -105,7 +105,3 @@ LANGCHAIN_TRACING_V2=true
 LANGCHAIN_API_KEY=your-langsmith-key
 LANGCHAIN_PROJECT=automaton-auditor
 ```
-
-## License
-
-MIT
