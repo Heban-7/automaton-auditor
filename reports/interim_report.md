@@ -141,37 +141,72 @@ Image extraction for the VisionInspector uses PyMuPDF's `page.get_images()` API 
 
 ### 3.1 High-Level Flow
 
-The complete StateGraph implements a dual fan-out/fan-in architecture with conditional error handling:
+The complete StateGraph implements a dual fan-out/fan-in architecture with conditional error handling. Each edge carries explicit data through the `AgentState` TypedDict:
 
 ```
 START
   |
+  | state = {repo_url, pdf_path}
   v
 ContextBuilder  (loads rubric.json into state)
   |
-  +---> RepoInvestigator  (clones repo, runs 7 forensic protocols)
+  | + rubric_dimensions: List[Dict]   (10 dimensions from rubric.json)
   |
-  +---> DocAnalyst         (parses PDF, checks theoretical depth + accuracy)
+  +========= PARALLEL FAN-OUT (Detective Layer) =========+
+  |                       |                               |
+  | repo_url              | pdf_path                      | pdf_path
+  | rubric_dimensions     | rubric_dimensions             | rubric_dimensions
+  v                       v                               v
+RepoInvestigator      DocAnalyst                   VisionInspector
+(clones repo,         (parses PDF,                 (extracts images,
+ 7 forensic            2 forensic                   analyses diagrams
+ protocols via         protocols                     via vision LLM)
+ AST + git log)        via PDF chunks)
+  |                       |                               |
+  | evidences:            | evidences:                    | evidences:
+  |  {"repo":             |  {"doc":                      |  {"vision":
+  |   [Evidence...]}      |   [Evidence...]}              |   [Evidence...]}
+  | repo_path: str        |                               |
+  |                       |                               |
+  +========= PARALLEL FAN-IN (operator.ior merge) ========+
   |
-  +---> VisionInspector    (extracts images, analyses diagrams via vision LLM)
-  |
+  | evidences: {"repo": [...], "doc": [...], "vision": [...]}
   v
-EvidenceAggregator  (fan-in: validates completeness, fills gaps)
+EvidenceAggregator  (validates completeness, fills gaps for missing dims)
   |
-  |  [conditional edge: if zero evidence -> skip to ReportRenderer]
+  | + evidences: {"aggregator_fill": [...]}  (if any dims uncovered)
   |
-  +---> Prosecutor   ("Trust No One" -- adversarial lens)
+  |  [CONDITIONAL: _check_evidence()]
+  |  if total evidence == 0 --> skip to ReportRenderer
+  |  else --> fan-out to all three judges
   |
-  +---> Defense      ("Reward Effort" -- optimistic lens)
+  +========= PARALLEL FAN-OUT (Judicial Layer) ==========+
+  |                       |                               |
+  | all evidences         | all evidences                 | all evidences
+  | rubric_dimensions     | rubric_dimensions             | rubric_dimensions
+  v                       v                               v
+Prosecutor            Defense                        TechLead
+"Trust No One"        "Reward Effort"                "Does it work?"
+Score: 1-5 (harsh)    Score: 1-5 (generous)          Score: 1-5 (pragmatic)
+  |                       |                               |
+  | opinions:             | opinions:                     | opinions:
+  |  [JudicialOpinion     |  [JudicialOpinion             |  [JudicialOpinion
+  |   x 10 dims]          |   x 10 dims]                  |   x 10 dims]
+  |                       |                               |
+  +========= PARALLEL FAN-IN (operator.add concat) ======+
   |
-  +---> TechLead     ("Does it work?" -- pragmatic lens)
-  |
+  | opinions: [JudicialOpinion x 30]  (3 judges x 10 dimensions)
   v
-ChiefJustice  (deterministic conflict resolution)
+ChiefJustice  (deterministic Python rules -- no LLM)
   |
+  | final_report: AuditReport
+  |   .criteria: [CriterionResult x 10]
+  |   .overall_score: float
+  |   .remediation_plan: str
   v
-ReportRenderer  (serializes AuditReport to Markdown)
+ReportRenderer  (serializes AuditReport to Markdown file)
   |
+  | writes audit/report_onself_generated/report.md
   v
 END
 ```
@@ -183,62 +218,94 @@ END
                           |      START       |
                           +--------+---------+
                                    |
+                                   | {repo_url, pdf_path}
                                    v
                           +------------------+
                           | ContextBuilder   |
                           | (load rubric)    |
                           +--------+---------+
                                    |
+                                   | + rubric_dimensions: List[Dict]
+                                   |
                   +----------------+----------------+
                   |                |                 |
+                  | repo_url      | pdf_path        | pdf_path
+                  | rubric_dims   | rubric_dims     | rubric_dims
                   v                v                 v
         +-----------------+ +-----------+ +------------------+
         |RepoInvestigator | |DocAnalyst | |VisionInspector   |
-        |                 | |           | |(implementation   |
-        |7 forensic       | |2 forensic | | required,        |
-        |protocols via    | |protocols  | | execution         |
-        |AST + git log    | |via PDF    | | optional)         |
+        |                 | |           | |                  |
+        |7 forensic       | |2 forensic | |1 forensic       |
+        |protocols via    | |protocols  | |protocol via      |
+        |AST + git log    | |via PDF    | |multimodal LLM    |
         +---------+-------+ +-----+-----+ +--------+---------+
                   |               |                 |
-                  +---------------+-----------------+
-                                  |
-                                  v
+                  | evidences:    | evidences:      | evidences:
+                  | {"repo":     | {"doc":         | {"vision":
+                  |  [Evidence]} |  [Evidence]}    |  [Evidence]}
+                  | repo_path    |                 |
+                  |               |                 |
+                  +-------+-------+--------+--------+
+                          |  operator.ior   |
+                          |  (dict merge)   |
+                          v                 v
                         +-------------------+
                         |EvidenceAggregator |
                         |(validate + fill   |
                         | missing dims)     |
                         +---------+---------+
                                   |
-                    [conditional: has_evidence?]
+                    [conditional: _check_evidence()]
+                    [returns list of next nodes   ]
                                   |
-                  +---------------+----------------+
-                  |               |                |
-                  v               v                v
-           +------------+ +------------+ +------------+
-           | Prosecutor | |  Defense   | |  TechLead  |
-           | Score: 1-5 | | Score: 1-5 | | Score: 1-5 |
-           | (harsh)    | | (generous) | | (pragmatic)|
-           +------+-----+ +------+-----+ +------+-----+
-                  |               |               |
-                  +---------------+---------------+
-                                  |
-                                  v
-                        +-------------------+
-                        |   ChiefJustice    |
-                        | (deterministic    |
-                        |  Python rules)    |
-                        |                   |
-                        | Rules applied:    |
-                        | 1.Security Override|
-                        | 2.Fact Supremacy  |
-                        | 3.Func. Weight    |
-                        | 4.Variance Reeval |
-                        +---------+---------+
-                                  |
-                                  v
-                        +-------------------+
-                        |  ReportRenderer   |
+                    YES: evidence > 0       NO: evidence == 0
+                          |                       |
+                  +-------+-------+               |
+                  |       |       |               |
+                  | all   | all   | all           | (empty state)
+                  | evid. | evid. | evid.         |
+                  v       v       v               |
+           +----------+ +------+ +----------+     |
+           |Prosecutor| |Def.  | |TechLead  |     |
+           |          | |Atty  | |          |     |
+           |opinions: | |opin.:| |opinions: |     |
+           |[Judicial | |[Jud. | |[Judicial |     |
+           | Opinion  | | Opin.| | Opinion  |     |
+           | x10]     | | x10] | | x10]     |     |
+           +----+-----+ +--+---+ +----+-----+     |
+                |           |          |           |
+                | operator.add (list concat)       |
+                +-----+-----+----+-----+           |
+                      |              |             |
+                      | opinions:    |             |
+                      | [x30 total]  |             |
+                      v              |             |
+                +-------------------+|             |
+                |   ChiefJustice    ||             |
+                | (deterministic    ||             |
+                |  Python rules)    ||             |
+                |                   ||             |
+                | Rules applied:    ||             |
+                | 1.Security Override|             |
+                | 2.Fact Supremacy  ||             |
+                | 3.Func. Weight    ||             |
+                | 4.Variance Reeval ||             |
+                +---------+---------+             |
+                          |                       |
+                          | final_report:         |
+                          |   AuditReport         |
+                          |   .overall_score      |
+                          |   .criteria[10]       |
+                          |   .remediation_plan   |
+                          v                       |
+                        +-------------------+     |
+                        |  ReportRenderer   |<----+
                         | (Markdown file)   |
+                        |                   |
+                        | writes:           |
+                        | audit/report_on   |
+                        | self_generated/   |
+                        | report.md         |
                         +---------+---------+
                                   |
                                   v
