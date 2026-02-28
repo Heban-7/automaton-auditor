@@ -9,8 +9,8 @@ load_dotenv()
 BASE_DIR = Path(__file__).resolve().parent.parent
 RUBRIC_PATH = BASE_DIR / "rubric.json"
 
-LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o")
-VISION_MODEL = os.getenv("VISION_MODEL", "gpt-4o")
+LLM_MODEL = os.getenv("LLM_MODEL", "gemini-2.5-flash")
+VISION_MODEL = os.getenv("VISION_MODEL", "gemini-2.5-flash")
 
 
 def load_rubric() -> dict:

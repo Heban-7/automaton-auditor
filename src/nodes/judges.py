@@ -2,19 +2,23 @@
 
 Each judge analyses ALL rubric dimensions against the aggregated evidence
 through its distinct persona lens.  All LLM calls use
-``.with_structured_output(JudicialOpinion)`` for strict schema enforcement.
+``.with_structured_output(JudicialOpinionBatch)`` for strict schema enforcement.
+
+Optimised to make ONE LLM call per judge (batching all criteria) instead of
+one call per criterion, reducing total calls from 30 to 3.
 """
 
 from __future__ import annotations
 
-import json
+import time
+import traceback
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
+from langchain_google_genai import ChatGoogleGenerativeAI
 
 from src.config import LLM_MODEL, load_rubric
-from src.state import AgentState, Evidence, JudicialOpinion
+from src.state import AgentState, Evidence, JudicialOpinion, JudicialOpinionBatch
 
 # ---------------------------------------------------------------------------
 # System prompts -- each persona has a fundamentally different philosophy
@@ -46,7 +50,7 @@ supports your charge.
 5. List every specific missing element.
 6. If evidence says "found=false", that is grounds for a low score.
 
-You MUST respond with a structured JudicialOpinion for each criterion."""
+You MUST produce a JudicialOpinion for EVERY criterion listed below."""
 
 DEFENSE_SYSTEM_PROMPT = """\
 You are The Defense Attorney in a Digital Courtroom for code auditing.
@@ -74,7 +78,7 @@ iteration, argue for a higher score based on Engineering Process.
 5. If something is partially done, argue for partial credit.
 6. Even if evidence says "found=false", check if related work exists.
 
-You MUST respond with a structured JudicialOpinion for each criterion."""
+You MUST produce a JudicialOpinion for EVERY criterion listed below."""
 
 TECH_LEAD_SYSTEM_PROMPT = """\
 You are The Tech Lead in a Digital Courtroom for code auditing.
@@ -102,7 +106,7 @@ assess the Technical Debt and provide a realistic middle-ground score.
 4. Provide concrete technical remediation advice.
 5. Assign scores of 1, 3, or 5 (avoid 2 and 4) unless truly warranted.
 
-You MUST respond with a structured JudicialOpinion for each criterion."""
+You MUST produce a JudicialOpinion for EVERY criterion listed below."""
 
 
 # ---------------------------------------------------------------------------
@@ -135,18 +139,14 @@ def _format_evidence_for_prompt(
     return "\n".join(parts) if parts else "No evidence available."
 
 
-def _run_judge(
+def _build_batched_prompt(
     state: AgentState,
     persona: str,
-    system_prompt: str,
-) -> dict:
-    """Execute a single judge across all rubric dimensions."""
-    llm = ChatOpenAI(model=LLM_MODEL, temperature=0.2).with_structured_output(
-        JudicialOpinion
-    )
+) -> str:
+    """Build a single prompt containing ALL rubric criteria and their evidence."""
     evidence_by_goal = _flatten_evidence(state)
     rubric = load_rubric()
-    opinions: list[JudicialOpinion] = []
+    sections: list[str] = []
 
     for dim in rubric["dimensions"]:
         dim_id = dim["id"]
@@ -154,42 +154,98 @@ def _run_judge(
         evidence_list = evidence_by_goal.get(dim_id, [])
         evidence_text = _format_evidence_for_prompt(evidence_list)
 
-        user_msg = (
+        sections.append(
             f"## Criterion: {dim_name} (id: {dim_id})\n\n"
             f"### Success Pattern\n{dim.get('success_pattern', 'N/A')}\n\n"
             f"### Failure Pattern\n{dim.get('failure_pattern', 'N/A')}\n\n"
-            f"### Forensic Evidence Collected\n{evidence_text}\n\n"
-            f"Provide your JudicialOpinion for this criterion. "
-            f"Your judge field must be '{persona}' and criterion_id must be '{dim_id}'."
+            f"### Forensic Evidence Collected\n{evidence_text}\n"
         )
 
-        max_retries = 2
-        for attempt in range(max_retries + 1):
-            try:
-                opinion = llm.invoke(
-                    [
-                        SystemMessage(content=system_prompt),
-                        HumanMessage(content=user_msg),
-                    ]
-                )
-                if isinstance(opinion, JudicialOpinion):
-                    opinion.judge = persona  # type: ignore[assignment]
-                    opinion.criterion_id = dim_id
-                    opinions.append(opinion)
-                    break
-            except Exception:
-                if attempt == max_retries:
-                    opinions.append(
+    criteria_block = "\n---\n\n".join(sections)
+
+    return (
+        f"You must evaluate ALL of the following {len(rubric['dimensions'])} criteria.\n"
+        f"For EACH criterion, produce a JudicialOpinion with:\n"
+        f"- judge: '{persona}'\n"
+        f"- criterion_id: the exact id shown in parentheses\n"
+        f"- score: integer 1-5\n"
+        f"- argument: your detailed reasoning\n"
+        f"- cited_evidence: list of evidence references\n\n"
+        f"Return ALL opinions as a batch.\n\n"
+        f"---\n\n{criteria_block}"
+    )
+
+
+def _run_judge(
+    state: AgentState,
+    persona: str,
+    system_prompt: str,
+) -> dict:
+    """Execute a single judge across all rubric dimensions in ONE LLM call."""
+    llm = ChatGoogleGenerativeAI(
+        model=LLM_MODEL, temperature=0.2
+    ).with_structured_output(JudicialOpinionBatch)
+
+    user_msg = _build_batched_prompt(state, persona)
+    rubric = load_rubric()
+    expected_ids = {d["id"] for d in rubric["dimensions"]}
+
+    max_retries = 4
+    for attempt in range(max_retries + 1):
+        try:
+            print(f"  [{persona}] Calling LLM (attempt {attempt + 1}/{max_retries + 1})...")
+            batch = llm.invoke(
+                [
+                    SystemMessage(content=system_prompt),
+                    HumanMessage(content=user_msg),
+                ]
+            )
+            if isinstance(batch, JudicialOpinionBatch) and batch.opinions:
+                for op in batch.opinions:
+                    op.judge = persona  # type: ignore[assignment]
+                print(f"  [{persona}] Got {len(batch.opinions)} opinions.")
+
+                covered_ids = {op.criterion_id for op in batch.opinions}
+                missing_ids = expected_ids - covered_ids
+                result_opinions = list(batch.opinions)
+                for mid in missing_ids:
+                    result_opinions.append(
                         JudicialOpinion(
                             judge=persona,  # type: ignore[arg-type]
-                            criterion_id=dim_id,
+                            criterion_id=mid,
                             score=1,
-                            argument=f"[{persona}] Failed to produce structured output after retries.",
+                            argument=f"[{persona}] No opinion produced for this criterion.",
                             cited_evidence=[],
                         )
                     )
+                return {"opinions": result_opinions}
 
-    return {"opinions": opinions}
+        except Exception as exc:
+            err_str = str(exc)
+            print(f"  [{persona}] Attempt {attempt + 1} failed: {type(exc).__name__}: {err_str[:200]}")
+
+            if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+                wait = min(2 ** attempt * 10, 120)
+                print(f"  [{persona}] Rate limited. Waiting {wait}s before retry...")
+                time.sleep(wait)
+                continue
+
+            if attempt == max_retries:
+                print(f"  [{persona}] All retries exhausted. Using fallback scores.")
+                traceback.print_exc()
+
+    fallback: list[JudicialOpinion] = []
+    for dim in rubric["dimensions"]:
+        fallback.append(
+            JudicialOpinion(
+                judge=persona,  # type: ignore[arg-type]
+                criterion_id=dim["id"],
+                score=1,
+                argument=f"[{persona}] Failed to produce structured output after {max_retries + 1} attempts.",
+                cited_evidence=[],
+            )
+        )
+    return {"opinions": fallback}
 
 
 # ===================================================================

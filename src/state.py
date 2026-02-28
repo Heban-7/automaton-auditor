@@ -42,6 +42,12 @@ class JudicialOpinion(BaseModel):
     cited_evidence: List[str]
 
 
+class JudicialOpinionBatch(BaseModel):
+    """Batch of opinions from a single judge across all rubric criteria."""
+
+    opinions: List[JudicialOpinion]
+
+
 # ---------------------------------------------------------------------------
 # Chief Justice Output
 # ---------------------------------------------------------------------------
@@ -81,6 +87,7 @@ class AuditReport(BaseModel):
 class AgentState(TypedDict):
     repo_url: str
     pdf_path: str
+    output_dir: str
     rubric_dimensions: List[Dict]
     repo_path: str
     evidences: Annotated[Dict[str, List[Evidence]], operator.ior]

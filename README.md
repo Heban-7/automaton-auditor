@@ -9,8 +9,10 @@ START
   -> ContextBuilder
   -> [RepoInvestigator || DocAnalyst || VisionInspector]   (parallel fan-out)
   -> EvidenceAggregator                                    (fan-in)
-  -> [Prosecutor || Defense || TechLead]                   (parallel fan-out)
-  -> ChiefJustice                                          (fan-in)
+  -> (conditional: has evidence?)
+      YES -> [Prosecutor || Defense || TechLead]           (parallel fan-out)
+           -> ChiefJustice                                 (fan-in)
+      NO  -> (skip judicial layer)
   -> ReportRenderer
   -> END
 ```
@@ -25,8 +27,7 @@ START
 
 - Python 3.11+
 - [uv](https://docs.astral.sh/uv/) package manager
-- An OpenAI API key (GPT-4o is the default model)
-- (Optional) A Google API key for Gemini vision analysis
+- A Google API key for Gemini (Gemini 2.5 Flash is the default model)
 - (Optional) A LangSmith API key for tracing
 
 ## Setup
@@ -41,51 +42,54 @@ uv sync
 
 # Configure environment
 cp .env.example .env
-# Edit .env and fill in your API keys
+# Edit .env and fill in your GOOGLE_API_KEY
 ```
 
 ## Running the Auditor
 
 ```bash
-# Audit a repository (no PDF report)
+# Self-audit: run against your own repo (saves to audit/report_onself_generated/)
+uv run python -m src --repo https://github.com/Heban-7/automaton-auditor \
+    --pdf reports/final_report.pdf
+
+# Peer-audit: run against an assigned peer's repo (saves to audit/report_onpeer_generated/)
+uv run python -m src --repo https://github.com/peer/repo \
+    --pdf path/to/peer_report.pdf \
+    --output-dir audit/report_onpeer_generated
+
+# Audit without a PDF report
 uv run python -m src --repo https://github.com/user/repo
-
-# Audit a repository with a PDF report
-uv run python -m src --repo https://github.com/user/repo --pdf path/to/report.pdf
-
-# Specify a custom output directory
-uv run python -m src --repo https://github.com/user/repo --pdf report.pdf --output-dir audit/report_onpeer_generated
 ```
-
-The audit report will be written to `audit/report_onself_generated/report.md` by default.
 
 ## Project Structure
 
 ```
 automaton-auditor/
-  pyproject.toml          # Dependencies (managed via uv)
-  .env.example            # Required environment variables
-  rubric.json             # Machine-readable auditing rubric (the "Constitution")
+  pyproject.toml              # Dependencies (managed via uv)
+  .env.example                # Required environment variables
+  rubric.json                 # Machine-readable auditing rubric (the "Constitution")
+  Dockerfile                  # Containerized runtime (optional)
   src/
     __init__.py
-    __main__.py            # CLI entry point (python -m src)
-    config.py              # Configuration loader (.env, rubric, LLM settings)
-    state.py               # Pydantic models & TypedDict state with reducers
-    graph.py               # Full StateGraph with fan-out/fan-in orchestration
+    __main__.py               # CLI entry point (python -m src)
+    config.py                 # Configuration loader (.env, rubric, LLM model names)
+    state.py                  # Pydantic models & TypedDict state with reducers
+    graph.py                  # Full StateGraph with fan-out/fan-in orchestration
     tools/
       __init__.py
-      repo_tools.py        # Sandboxed git clone, git history, AST analysis
-      doc_tools.py         # PDF parsing (docling/PyMuPDF), keyword search, image extraction
+      repo_tools.py           # Sandboxed git clone, git history, AST analysis
+      doc_tools.py            # PDF parsing (docling/PyMuPDF), keyword search, image extraction
     nodes/
       __init__.py
-      detectives.py        # RepoInvestigator, DocAnalyst, VisionInspector, EvidenceAggregator
-      judges.py            # Prosecutor, Defense, TechLead with distinct system prompts
-      justice.py           # ChiefJustice (deterministic rules) + Markdown report renderer
+      detectives.py           # RepoInvestigator, DocAnalyst, VisionInspector, EvidenceAggregator
+      judges.py               # Prosecutor, Defense, TechLead with distinct system prompts
+      justice.py              # ChiefJustice (deterministic rules) + Markdown report renderer
   audit/
-    report_onself_generated/   # Self-audit output
-    report_onpeer_generated/   # Peer-audit output
-    report_bypeer_received/    # Received peer audit
-  reports/                     # PDF reports
+    report_onself_generated/  # Report when you audit your own repo (run with default --output-dir)
+    report_onpeer_generated/  # Report when you audit a peer's repo (use --output-dir audit/report_onpeer_generated)
+    report_bypeer_received/   # Report your peer's agent generated when auditing your repo (place here manually)
+  reports/
+    final_report.pdf          # Architectural report for peer agents to ingest
 ```
 
 ## Key Design Decisions
@@ -93,8 +97,20 @@ automaton-auditor/
 - **Pydantic over dicts**: All state and outputs use typed `BaseModel` / `TypedDict` schemas with `operator.add` and `operator.ior` reducers to prevent data loss during parallel execution.
 - **AST over regex**: Code analysis uses Python's built-in `ast` module for structural verification rather than brittle regex patterns.
 - **Sandboxed cloning**: All git operations run inside `tempfile.TemporaryDirectory()` using `subprocess.run()` with error handling. No `os.system()` calls.
-- **Structured output enforcement**: All Judge LLM calls use `.with_structured_output(JudicialOpinion)` with retry logic.
-- **Deterministic synthesis**: The ChiefJustice applies named Python rules (security override, fact supremacy, etc.) rather than delegating to an LLM.
+- **Structured output enforcement**: All Judge LLM calls use `.with_structured_output(JudicialOpinionBatch)` with retry logic and exponential backoff.
+- **Deterministic synthesis**: The ChiefJustice applies named Python rules (security override, fact supremacy, functionality weight, variance re-evaluation) rather than delegating to an LLM.
+- **Batched judge calls**: Each judge evaluates all 10 criteria in a single LLM call (3 total API calls for the judicial layer) instead of 30 individual calls.
+
+## Environment Variables
+
+| Variable | Description | Required |
+|---|---|---|
+| `GOOGLE_API_KEY` | Google AI API key for Gemini | Yes |
+| `LANGCHAIN_TRACING_V2` | Enable LangSmith tracing (`true`) | Optional |
+| `LANGCHAIN_API_KEY` | LangSmith API key | Optional |
+| `LANGCHAIN_PROJECT` | LangSmith project name | Optional |
+| `LLM_MODEL` | Override the LLM model (default: `gemini-2.5-flash`) | Optional |
+| `VISION_MODEL` | Override the vision model (default: `gemini-2.5-flash`) | Optional |
 
 ## Observability
 

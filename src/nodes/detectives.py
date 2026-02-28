@@ -12,7 +12,7 @@ import os
 import traceback
 from typing import Any
 
-from langchain_openai import ChatOpenAI
+from langchain_google_genai import ChatGoogleGenerativeAI
 
 from src.config import get_dimensions_for_artifact, load_rubric
 from src.state import AgentState, Evidence
@@ -543,7 +543,7 @@ def _analyze_diagrams_with_vision(image_paths: list[str]) -> dict:
     """Send images to a multimodal LLM for architectural analysis."""
     from src.config import VISION_MODEL
 
-    llm = ChatOpenAI(model=VISION_MODEL)
+    llm = ChatGoogleGenerativeAI(model=VISION_MODEL)
 
     image_contents = []
     for img_path in image_paths[:5]:

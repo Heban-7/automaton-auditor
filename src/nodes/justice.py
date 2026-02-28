@@ -281,7 +281,7 @@ def report_renderer_node(state: AgentState) -> dict:
 
     md = _render_markdown(report)
 
-    out_dir = os.path.join("audit", "report_onself_generated")
+    out_dir = state.get("output_dir", "") or "audit/report_onself_generated"
     os.makedirs(out_dir, exist_ok=True)
     out_path = os.path.join(out_dir, "report.md")
     with open(out_path, "w", encoding="utf-8") as f:

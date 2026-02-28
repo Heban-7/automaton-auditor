@@ -139,6 +139,7 @@ def main() -> None:
     initial_state: AgentState = {
         "repo_url": args.repo,
         "pdf_path": args.pdf,
+        "output_dir": args.output_dir,
         "rubric_dimensions": [],
         "repo_path": "",
         "evidences": {},
